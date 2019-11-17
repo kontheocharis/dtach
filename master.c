@@ -53,6 +53,10 @@ static struct client *clients;
 /* The pseudo-terminal created for the child process. */
 static struct pty the_pty;
 
+/* The scrollback buffer */
+static unsigned char scrollback[SCROLLSIZE];
+static int scroll_end, scroll_full;
+
 #ifndef HAVE_FORKPTY
 pid_t forkpty(int *amaster, char *name, struct termios *termp,
 	struct winsize *winp);
@@ -219,6 +223,68 @@ create_socket(char *name)
 	return s;
 }
 
+
+/* Write the data in *buf into the scrollback buffer */
+static void
+write_scrollback(unsigned char *buf, int len)
+{
+	int n;
+	if (len > SCROLLSIZE)
+	{
+		buf = buf + (len - SCROLLSIZE);
+		len = SCROLLSIZE;
+	}
+
+	n = SCROLLSIZE - scroll_end;
+	if (n >= len)
+	{
+		memcpy(scrollback + scroll_end, buf,
+		       len * sizeof(unsigned char));
+		scroll_end += len * sizeof(unsigned char);
+		scroll_full = 1;
+	}
+	else
+	{
+		memcpy(scrollback + scroll_end, buf,
+		       n * sizeof(unsigned char));
+		scroll_end = len - n;
+		memcpy(scrollback, buf,
+		       scroll_end * sizeof(unsigned char));
+	}
+}
+
+/* Send the data in the scrollback buffer to client */
+static void
+send_scrollback(struct client *p)
+{
+	int written, len;
+	if (scroll_full)
+	{
+		len = SCROLLSIZE - scroll_end;
+		written = 0;
+		while (written < len)
+		{
+			int n = write(p->fd, scrollback + scroll_end + written,
+			              len - written);
+			if (n > 0)
+				written += n;
+			else if (n == 0 || errno != EINTR)
+				break;
+		}
+	}
+	len = scroll_end;
+	written = 0;
+	while (written < len)
+	{
+		int n = write(p->fd, scrollback + written, len - written);
+		if (n > 0)
+			written += n;
+		else if (n == 0 || errno != EINTR)
+			break;
+	}
+}
+
+
 /* Update the modes on the socket. */
 static void
 update_socket_modes(int exec)
@@ -320,6 +386,8 @@ top:
 	/* Try again if nothing happened. */
 	if (!FD_ISSET(s, &readfds) && nclients == 0)
 		goto top;
+
+    write_scrollback(buf, len);
 }
 
 /* Process activity on the control socket */
@@ -348,6 +416,8 @@ control_activity(int s)
 	if (p->next)
 		p->next->pprev = &p->next;
 	*(p->pprev) = p;
+
+    send_scrollback(p);
 }
 
 /* Process activity from a client. */
